@@ -1,108 +1,120 @@
 /*
   Protocol is:
 
-  Bulbs:
+  Devices:
 
-  GET /bublbs -> List of bulbs
-  PUT /bulb/:index -> Send command to bulb, as json, possible commands: on, off, color.
+  GET /devices -> List of devices
+  PUT /device/:index -> Send command to device, as json, possible commands: on, off, color, ...
   Color requires parameter, i.e
   {
     "command": "color",
     "paramter": [255,0,255]
   }
 
-  Rooms:
+  Areas:
 
-  GET /rooms -> List of rooms
-  PUT /room/:index -> Send command to all bulbs in a room
+  GET /areas -> List of rooms
+  PUT /area/:index -> Send command to all devices in a area
 */
 
-
 const app = require('express')()
-const ledlble = require('ledble')
+const config = require('./config')
+const ledble = require('ledble')
+
+// ledble shim for testing
+/*
+const ledble = {
+  Bulb: () => Promise.resolve({
+      turn_on: () => { console.log('turn_on'); return Promise.resolve(null) },
+      turn_off: () => { console.log('turn_off'); return Promise.resolve(null) },
+      set_color: (r,g,b) => { console.log("set_color", r, g, b); return Promise.resolve(null) },
+      set_effect: (effect, speed) => { console.log("set_effect", effect, speed); return Promise.resolve(null) },
+      set_brightness: (value) =>  { console.log("set_brightness", value); return Promise.resolve(null) }
+  })
+}
+*/
 
 app.use(require('body-parser').json())
+app.use(require('cors')())
 
-const BULBS = [
-  {
-    name: 'Couchlight',
-    address: 'e8:eb:11:0e:bf:73'
-  },
-  {
-    name: 'Beamerlight',
-    address: 'e8:eb:11:0f:8a:4c'
-  },
-  {
-    name: 'Monumentlight',
-    address: 'ff:ff:97:02:3a:c8'
+// delay middleware
+app.use((req, res, next) => setTimeout(next,250))
+
+// auth middleware
+app.use((req, res, next) => {
+  if(!config.password) {
+    next()
+    return
   }
-]
-
-const ROOMS = [
-  {
-    name: 'Wohnzimmer',
-    bulbs: [0,1,2]
+  const b64auth = (req.headers.authorization || '').split(' ')[1] || ''
+  const [,password] = new Buffer(b64auth, 'base64').toString().split(':')
+  if(password === config.password) {
+    next()
+    return
   }
-]
+  res.set('WWW-Authenticate', 'Basic realm="password required"').status(401).send('not authorized')
+})
 
-const bulb_command = async (index, command, args) => {
-  const device = BULBS[index].device
+const device_command = async (index, command, args) => {
+  const device = config.devices[index].device
   switch(command) {
     case 'on':
-      device.turn_on()
-      break
+      return await device.turn_on()
     case 'off':
-      device.turn_off()
-      break
+      return await device.turn_off()
     case 'color':
-      device.set_color(args[0], args[1], args[2])
-      break
+      return await device.set_color(args[0], args[1], args[2])
+    case 'effect':
+      return await device.set_effect(args[0], args[1])
+    case 'warmwhite':
+      return await device.set_brightness(args[0])
     default:
       throw new Error('command not supported')
   }
 }
 
-app.get('/bulbs', (req, res) => {
-  res.json(BULBS.map((b,i) => ({ 
+app.get('/devices', (req, res) => {
+  res.json(config.devices.map((d,i) => ({ 
       index: i,
-      name: b.name,
-      address: b.address
+      name: d.name,
+      address: d.address,
+      caps: d.caps
   })))
 })
 
-app.put('/bulb/:index', async (req, res) => {
+app.put('/device/:index', async (req, res) => {
   try {
-    await bulb_command(Number(req.params.index), req.body.command, req.body.arguments)
+    await device_command(Number(req.params.index), req.body.command, req.body.args)
     res.json({
       status: 'ok'
     })
   }
   catch (error) {
     console.error(error)
-    res.status(503)
-    res.json({
+    res.status(503).json({
       status: 'error',
       error: error
     })
   }
 })
 
-app.get('/rooms', (req, res) => {
-  res.json(ROOMS.map((r,i) => ({
+app.get('/areas', (req, res) => {
+  res.json(config.areas.map((a,i) => ({
     index: i,
-    name: r.name,
-    bulbs: r.bulbs.map((b,bi) => ({
-      index: bi,
-      name: BULBS[b].name,
-      address: BULBS[b].address
+    name: a.name,
+    devices: a.devices.map((d,di) => ({
+      index: di,
+      name: config.devices[d].name,
+      address: config.devices[d].address,
+      caps: config.devices[d].caps
     }))
   })))
 })
 
-app.put('/room/:index', async (req, res) => {
+app.put('/area/:index', async (req, res) => {
   try {
-    for(let bi of ROOMS[Number(req.params.index)].bulbs) {
-      await bulb_command(bi, req.body.command, req.body.arguments)
+    for(let di of config.areas[Number(req.params.index)].devices) {
+      await device_command(di, req.body.command, req.body.args)
     }
     res.json({
       status: 'ok'
@@ -119,15 +131,16 @@ app.put('/room/:index', async (req, res) => {
 })
 
 const init = async () => {
-  for(let bulb of BULBS) {
+  for(let device of config.devices) {
     try {
-      bulb.device = await ledlble.Bulb(bulb.address)
+      // TODO: check type and differend libs
+      device.device = await ledble.Bulb(device.address)
     }
-    catch (err) {
-      console.error('could not init led', bulb, err)
+    catch (error) {
+      console.error('could not init device', device, error)
     }
   }
-  app.listen(3000, () => { console.log('server running') })
+  app.listen(config.port, () => { console.log('server running', config.port) })
 }
 
 init()
